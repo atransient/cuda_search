@@ -4,6 +4,13 @@
 #include "data_relate.h"
 using std::cout, std::endl;
 
+constexpr uint M = 64;
+constexpr uint N = 32;
+constexpr uint K = 16;
+
+constexpr uint smem_M = 32;
+constexpr uint smem_N = 16;
+constexpr uint smem_K = K;
 
 __inline__ uint ceil_div(uint val1, uint val2)
 {
@@ -19,14 +26,35 @@ __device__ __inline__ uint flattening(uint idx_x, uint idx_y, uint y_dim)
 
 __global__ void matmul_kernel(float* A, float* B, float* C, uint M, uint N, uint K)
 {
+    
+    __shared__ float smemA[smem_M][smem_K];
+    __shared__ float smemB[smem_K][smem_N];
     uint idx_x = blockDim.x * blockIdx.x + threadIdx.x;
     uint idx_y = blockDim.y * blockIdx.y + threadIdx.y;
     if (idx_x >= M || idx_y >= N)
         return;
+    uint begin_m = blockIdx.x * smem_M;
+    uint begin_n = blockIdx.y * smem_N;
+    if (threadIdx.y == 0)
+    {
+        for (int i = 0; i < K; ++i)
+        {
+            smemA[threadIdx.x][i] = A[flattening(begin_m + threadIdx.x, i, K)];
+        }
+    }
+    uint tid = threadIdx.y * blockDim.x + threadIdx.x;
+    if (tid < K)
+    {
+        for (int i = 0; i < smem_N; ++i)
+        {
+            smemB[tid][i] = B[flattening(tid, i + begin_n, N)];
+        }
+    }
+    __syncthreads();
     float res = 0.0;
     for (uint i = 0; i < K; ++i)
     {
-        res += A[flattening(idx_x, i, K)] * B[flattening(i, idx_y, N)];
+        res += smemA[threadIdx.x][i] * smemB[i][threadIdx.y];
     }
     C[flattening(idx_x, idx_y, N)] = res;
 }
@@ -34,13 +62,10 @@ __global__ void matmul_kernel(float* A, float* B, float* C, uint M, uint N, uint
 
 int main()
 {
-    const uint M = 64;
-    const uint N = 32;
-    const uint K = 16;
     Surface<float> A_tensor(M * K, false);
     Surface<float> B_tensor(K * N, false);
     Surface<float> C_tensor(M * N, true);
-    dim3 block(32,16,1);
+    dim3 block(smem_M,smem_N,1);
     dim3 grid(ceil_div(M, block.x), ceil_div(N, block.y), 1);
     matmul_kernel<<<grid, block>>>(A_tensor.devPtr, B_tensor.devPtr, C_tensor.devPtr, M, N, K);
     cudaDeviceSynchronize();
